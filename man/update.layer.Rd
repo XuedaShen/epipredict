@@ -19,10 +19,10 @@ values will replace the elements of the same name in the actual \code{layer}.
 \examples{
 f <- frosting() \%>\%
   layer_predict() \%>\%
-  layer_naomit() \%>\%
+  layer_naomit(.pred) \%>\%
   layer_add_forecast_date("2021-01-01")
 f$layers[[2]]$id
 f$layers[[3]]$forecast_date
 
-update(f$layers[[2]], id = "kill_all_the_nas!")
+update(f$layers[[2]], id = "kill_all_the_nas")
 }
