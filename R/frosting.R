@@ -104,14 +104,9 @@ is_frosting <- function(x) {
 }
 
 #' @importFrom rlang caller_env
-validate_frosting <- function(x, ..., arg = "`x`", call = caller_env()) {
-  rlang::check_dots_empty()
-  if (!is_frosting(x)) {
-    glubort(
-      "{arg} must be a frosting postprocessor, not a {class(x)[[1]]}.",
-      .call = call
-    )
-  }
+validate_frosting <- function(x) {
+  if (!is_frosting(x))
+    cli_stop("x must be a frosting postprocessor, not a {class(x)[1]}.")
   invisible(x)
 }
 
