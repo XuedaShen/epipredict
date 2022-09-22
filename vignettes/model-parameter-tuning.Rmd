@@ -1,33 +1,45 @@
 ---
-title: Model Parameter Tuning
+title: "Model comparisons and parameter tuning"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Model Parameter Tuning}
+  %\VignetteIndexEntry{Model comparisons}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  collapse = TRUE,
+  comment = "#>",
+  out.width = "100%")
 ```
 
 
-```{r}
+
+In this vignette, we're going to look at using k-fold cross validation to compare
+which of two models is more useful in predicting COVID-19 death rates and then 
+we'll do some hyperparameter tuning on the chosen model.
+
+```{r load-packages, message=FALSE}
 library(epiprocess)
 library(epipredict)
-library(timetk)
+library(tidyr)
+library(ggplot2)
+library(parsnip)
+library(stringr)
+#library(timetk)
 library(rsample)
+library(recipes)
 library(dials)
 library(purrr, include.only = 'pluck')
 library(broom, include.only = 'tidy')
 library(tune)
 library(glmnet)
 library(dplyr)
+theme_set(theme_bw())
 ```
 
-In this vignette, we're going to look at using k-fold cross validation to compare
-which of two models is more useful in predicting COVID-19 death rates and then 
-we'll do some hyperparameter tuning on the chosen model.
 
 The dataset we'll be using is `case_death_rate_subset`, which contains confirmed 
 COVID-19 cases and deaths from Dec 31, 2020 to Dec 31, 2021 from reports made 
@@ -35,155 +47,195 @@ available by Johns Hopkins University. To simplify things, we'll just use the
 data for California from October 1, 2021 to December 31, 2021, inclusive:
 
 ```{r}
-x <- case_death_rate_subset %>%
-  filter(time_value >= "2021-10-01", 
-         time_value <= "2021-12-31",
-         geo_value %in% c("ca"))
-
-glimpse(x)
+x <- case_death_rate_subset
 ```
 
 Let's suppose we want to compare whether having more lags is useful in predicting 
-7 day ahead death rates. Using k-fold cross validation will help us determine
-this. First, we construct two recipes that only differ in the inclusion of
-14 day lag case and death rate predictors:
+7 day ahead death rates. Using cross validation will help us determine
+this. There are many packages that can
+construct the CV splits (e.g. [`{rsample}`](https://rsample.tidymodels.org) or
+[`{timetk}`](https://business-science.github.io/timetk/)), but perhaps the easiest
+is to use the `epi_slide()` in `{epiprocess}`. One could easily perform proper 
+validation with `epix_slide()` and an `epi_archive`, but for simplicity, 
+we'll just use the `epi_df` mentioned above.
 
-```{r}
-r_less <- epi_recipe(x) %>%
-      step_epi_lag(case_rate, lag = c(0, 7)) %>%
-      step_epi_lag(death_rate, lag = c(0, 7)) %>%
-      step_epi_ahead(death_rate, ahead = 7, role = "outcome") %>%
-      step_epi_naomit()
 
-r_more <- epi_recipe(x) %>%
-      step_epi_lag(case_rate, lag = c(0, 7, 14)) %>%
-      step_epi_lag(death_rate, lag = c(0, 7, 14)) %>%
-      step_epi_ahead(death_rate, ahead = 7, role = "outcome") %>%
-      step_epi_naomit()
+We will use rolling 1-month periods of consecutive data to train the models and
+create predictions for 1-week ahead. 
+
+```{r fcast-dates}
+fcast_dates <- seq(as.Date("2021-02-27"), as.Date("2021-12-15"), by = "2 weeks")
 ```
 
-Next, we'll resample the time series data. We will use 1-month consecutive data 
-to train the models and hold the next day as assessment/testing data. 
+We'll make predictions on every other Sunday, beginning at the end of February
+resulting in `r length(fcast_dates)` forecasts.
 
-There are multiple packages that split time series data. The more common one is
-`rsample`, some other choices include the `timetk` package, which is also built
-on the tidyverse. The `time_series_cv()` function from `timetk` package comes 
-in handy for doing time series cross-validation. We will now demonstrate using 
-that function to get the cross-validation folds for our time series:
+```{r silde-him, warning=FALSE}
+two_weeks <- epi_slide(
+  x, ~arx_forecaster(
+    .x, "death_rate", c("case_rate", "death_rate"), 
+    args_list = arx_args_list(
+      lags = c(0, 7), # use only 2 weeks of lags
+      levels = c(.01, .025, 1:19/20, .975, .99)
+    ))$predictions %>%
+    select(.pred, .pred_distn, target_date),
+  n = 30, # days of training data for each location
+  ref_time_values = fcast_dates,
+  new_col_name = "pred")
 
-```{r}
-folds <- x %>%
-  timetk::time_series_cv(initial = "1 month",
-                 assess = 1,
-                 point_forecast = TRUE)
+three_weeks <- epi_slide(
+  x, ~arx_forecaster(
+    .x, "death_rate", c("case_rate", "death_rate"),
+    args_list = arx_args_list(
+      levels = c(.01, .025, 1:19/20, .975, .99)
+    ))$predictions %>%
+    select(.pred, .pred_distn, target_date),
+  n = 30,
+  ref_time_values = fcast_dates,
+  new_col_name = "pred"
+)
+
+all_preds <- bind_rows(
+  two_weeks = two_weeks, three_weeks = three_weeks, .id = "forecaster") %>%
+  rename_with(~str_extract(.x, "(?<=_)[^\\]]+"), starts_with("pred")) %>%
+  select(-case_rate, -death_rate)
 ```
 
-In total, there are `nrow(folds)` folds. And we can do a sanity check of the 
-date range for each training set in the splits. 
+To compare the forecasters, we simply add back the observed death rate aligned
+to the `target_date`. Then we can compute errors in various ways. Below,
+we compute the absolute error of our point predictions and the weighted
+interval score of the distributional prediction.
 
-```{r}
-training_window <- as.data.frame(c(), c())
-for(i in 1:nrow(folds)){
-  training_window[i,1] <- min(analysis(folds$splits[[i]])$time_value)
-  training_window[i,2] <- max(analysis(folds$splits[[i]])$time_value)
-}
-training_window
-```
-Now onto the model fitting (where we're only using linear regression):
-
-```{r}
-
-fit_model <- function(x,r) {
- epi_workflow(r, parsnip::linear_reg()) %>%
-    fit(x %>% analysis())
-}
-
-models_less = lapply(folds$splits, fit_model, r = r_less)
-models_more = lapply(folds$splits, fit_model, r = r_more)
-
+```{r evalcast}
+all_preds <- all_preds %>%
+  left_join(x %>% select(geo_value, time_value, death_rate),
+            by = c("geo_value", "target_date" = "time_value")) %>%
+  mutate(absolute_error = abs(.pred - death_rate),
+         wis = weighted_interval_score(.pred_distn, death_rate))
 ```
 
-We'll now work to get the predictions from our two models and compare the
-model performance by using mean squared prediction error (MSPE).
-Notice that the tricky part is to use functions such as `rsample::analysis()`
-and `rsample::assessment()` to format the cross-validation data sets. 
+The overall performance of the two forecasters is easily examined
 
-```{r}
-# Function to get the model predictions
-get_prediction <- function(model, assessment_date, recipe, data){
-  preprocessed <- bake(prep(recipe, data), data) 
-  assess <- preprocessed %>% 
-    filter(time_value == assessment_date) %>%
-    select(broom::tidy(model)$term[-1], time_value, geo_value)
-
-  return(predict(model$fit$fit, new_data = assess))
-}
-
-# Obtain assessment dates
-assessment_date_list <- epipredict:::map(lapply(folds$splits, assessment),
-                  ~ purrr::pluck( . ,"time_value")) 
-
-assessment_date <- do.call("c", assessment_date_list)
-
-# Get the predictions from our two models
-pred_less <- epipredict:::map2(models_less, assessment_date, get_prediction,
-             data = x, recipe = r_less) 
-pred_more <- epipredict:::map2(models_more, assessment_date, get_prediction,
-             data = x, recipe = r_more) 
-
-pred_less <- do.call(rbind, pred_less)
-pred_more <- do.call(rbind, pred_more)
-
-
-predictions <- data.frame(assessment_date, pred_less, pred_more) 
-colnames(predictions) <- c("time_value", "pred_less", "pred_more")
-
-# Format the real outcome values (like in the preprocessed data),
-# noting that the model predicts 7 day ahead for each date it's trained on
-real_outcome_df <- x %>% filter(time_value %in% (assessment_date + 7)) %>%
-    mutate(real_outcome = lead(death_rate, 7)) %>%
-      select(time_value, real_outcome)
-
-# Compare the MSPE of the two models
-predictions %>%
-  left_join(real_outcome_df) %>%
-  na.omit() %>%
-  mutate(spe_less = (real_outcome - pred_less)^2,
-         spe_more = (real_outcome - pred_more)^2) %>%
-  summarize(mspe_less = mean(spe_less),
-            mspe_more = mean(spe_more))
+```{r headline-summary}
+all_preds %>% 
+  group_by(forecaster) %>%
+  summarise(absolute_error = mean(absolute_error), wis = mean(wis)) %>%
+  knitr::kable()
 ```
 
-We can see that the model that does not include 14 day lag variables for 
-case and death rates has the lower MPSE. Hence, we'll choose that model.
+We can also investigate how the performance depends on time, averaged over all
+states and territories.
 
-In the next example, we will use `rolling_origin` from the `rsample` package for 
-cross-validation data splitting and we'll use it for hyperparameter tuning.
+```{r temporal-plot}
+all_preds %>%
+  pivot_longer(absolute_error:wis, names_to = "metric") %>%
+  group_by(forecaster, target_date, metric) %>%
+  summarise(value = mean(value)) %>%
+  ggplot(aes(target_date, value, colour = forecaster)) +
+  geom_line(aes(linetype = metric)) +
+  scale_colour_manual(values = c("dodgerblue", "orange")) +
+  theme(legend.position = "bottom")
+```
 
-Note that the model we're working with has two tuning parameters: penalty, 
-which refers to the amountof regularization and mixture, which is the 
-proportion of LASSO penalty.
+Based on this figure, there's not a major difference between the two forecasters.
+The one based on three weeks of lags makes comparable large errors in April
+and again in late-November. But they seem reasonable similar otherwise.
+We can also compare the errors spatially, averaging over time.
+
+```{r spatial-plot}
+data("state_census")
+st <- map_data("state") %>%
+  left_join(mutate(state_census, region = tolower(name)), )
+geo_summary <- all_preds %>%
+  pivot_longer(absolute_error:wis, names_to = "metric") %>%
+  group_by(forecaster, geo_value, metric) %>%
+  summarise(value = mean(value), .groups = "drop") 
+ggplot(left_join(st, geo_summary, by = c("abbr" = "geo_value")), 
+       aes(x = long, y = lat, group = abbr)) +
+  geom_polygon(aes(fill = value)) +
+  facet_grid(forecaster ~ metric) +
+  scale_fill_viridis_c()
+```
+
+These maps aren't super helpful to compare the forecasters, but they do reveal
+that Oklahoma was forecast particularly poorly.
+
+## Tuning hyperparameters
+
+Selecting hyperparameters in-sample, is a slightly different procedure, and 
+is easiest to do with the `{tune}` package. We'll focus on choosing the 
+lasso hyperparameter in `{glmnet}`. In the next example, we will use `rolling_origin` from the `rsample` package for 
+cross-validation data splitting (since this is time series) and hyperparameter tuning.
+
+
+The first step is to note that, in `glmnet`, the lambda parameter is mapped
+to `penalty` in the `{parsnip}` model specification. We want to indicate that
+it will be tuned rather than fixed. So we use the following specification.
 
 ```{r}
-tune_spec <- 
-  parsnip::linear_reg(penalty = tune(), mixture = tune()) %>% 
-  parsnip::set_engine("glmnet")
-
-tune_spec
+lasso_pre <- linear_reg(engine = "glmnet", penalty = 1, mixture = 1) 
+lasso <- linear_reg(engine = "glmnet", penalty = tune(), mixture = 1) 
 ```
 
 Think of `tune()` in the above as a placeholder. After the tuning process, 
-we will select a single numeric value for each of these hyperparameters. 
+we will select a single numeric value for `lambda`. 
 We will now create a random grid of tuning parameter combinations to choose
 from. The size parameter controls the number of parameter combinations 
 returned in the random grid.
 
-```{r}
-grid <- dials::grid_random(extract_parameter_set_dials(tune_spec), 
-                           size = 10)
+For hyperparameter tuning, cross-validation is done "manually" rather than 
+automatically using something like `cv.glmnet()`. Even so, it's verbose, but 
+not terribly complicated.
 
-grid
+```{r}
+small_data <- x %>% filter(time_value < "2021-03-01") # ~ 60 days of data x 56 locs
+fcaster <- arx_forecaster(
+  small_data, "death_rate", c("case_rate", "death_rate"),
+  trainer = lasso_pre,
+  args_list = arx_args_list(lags = c(1:21), levels = 1:19 / 20)
+)
+
+wf <- fcaster$epi_workflow
+m <- workflows::extract_mold(wf)
 ```
+
+
+The `m` or `mold` object above contains the results of processing the training
+data for prediction. If we want, at this point, we can abort the whole
+`workflow` / `recipe` / `tidymodels` game and go right to back to our handy-dandy
+`cv.glmnet()`.
+
+```{r brute-force-cv}
+out <- glmnet::cv.glmnet(as.matrix(m$predictors), m$outcomes[[1]])
+plot(out)
+```
+
+This is, unfortunately, the entirely incorrect thing to do. The reason is that
+the preprocessing is done to the "entire" data, when it should be done differentially
+to the different training sets. (Note that this problem is exacerbated by the 
+fact that we're using finalized data rather than vintage data, but we'll continue
+to ignore that at our peril.)
+
+
+```{r}
+# nothing below works yet, as best I can tell
+knitr::knit_exit()
+```
+
+
+```{r the-workflow}
+wide_mod <- epi_recipe(small_data) %>%
+  step_epi_lag(case_rate, death_rate, lag = 1:21) %>%
+  step_epi_ahead(death_rate, ahead = 7) %>%
+  step_epi_naomit()
+
+the_folds <- rsample::group_vfold_cv(small_data, group = geo_value, v = 5)
+penalty_grid <- data.frame(penalty = workflows::extract_fit_parsnip(wf)$fit$lambda)
+
+tune_lasso <- tune::tune_grid(epi_workflow(wide_mod, lasso, f), 
+                              the_folds, grid = penalty_grid)
+```
+
 Note that the data needs to be preprocessed before it is passed into the 
 workflow. We then using rolling origin forecast resampling to produce
 samples that take 60 days of data and use the next day as assessment

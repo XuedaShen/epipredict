@@ -43,6 +43,23 @@ arg_is_lgl = function(..., allow_null = FALSE, allow_na = FALSE, allow_empty = T
   )
 }
 
+arg_is_numeric = function(..., allow_null = FALSE, allow_na = FALSE, allow_empty = TRUE) {
+  handle_arg_list(
+    ...,
+    tests = function(name, value) {
+      if (!(is.numeric(value) | (is.null(value) & !allow_null)))
+        cli_stop("Argument {.val {name}} must be of logical type.")
+
+      if (any(is.na(value)) & !allow_na)
+        cli_stop("Argument {.val {name}} must not contain any missing values ({.val {NA}}).")
+
+      if (length(value) == 0 & !allow_empty)
+        cli_stop("Argument {.val {name}} must have length >= 1.")
+    }
+  )
+}
+
+
 arg_is_nonneg_int = function(..., allow_null = FALSE) {
   handle_arg_list(
     ...,
