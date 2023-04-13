@@ -19,6 +19,12 @@
 #' @param include_outside_range Logical, indicating if values outside the
 #'  range in the train set should be included in the lowest or highest bucket.
 #'  Defaults to `FALSE`, values outside the original range will be set to `NA`.
+#' @param collapse Logical. If the some buckets have no elements in the training
+#'   set, remove those buckets from the resulting factor. For example,
+#'   if `breaks = c(-Inf, 0, 2, Inf)` but the target feature has no values in
+#'   [0, 2], then the result will be as if breaks had been `c(-Inf, 0, Inf)`.
+#'   The empty bucket will be combined with whichever neighbouring bucket has
+#'   fewer values. No warning will be issued. Default is FALSE.
 #' @template step-return
 #' @export
 #' @details If `extend_range_to_inf` is FALSE, then unlike the `base::cut()`
@@ -47,7 +53,7 @@
 #'
 #' rec %>%
 #'   step_epi_cut(x, breaks = 5) %>%
-#'   prep() %>%
+#'   prep()
 #'   bake(df)
 step_epi_cut <- function(recipe,
                          ...,
@@ -56,9 +62,11 @@ step_epi_cut <- function(recipe,
                          breaks,
                          extend_range_to_inf = TRUE,
                          include_outside_range = FALSE,
+                         collapse = FALSE,
+                         columns = NULL,
                          skip = FALSE,
                          id = rand_id("epi_cut")) {
-  arg_is_lgl_scalar(trained, skip, include_outside_range)
+  arg_is_lgl_scalar(trained, skip, include_outside_range, collapse)
   arg_is_numeric(breaks)
   arg_is_chr_scalar(id)
   arg_is_lgl(extend_range_to_inf)
@@ -66,6 +74,9 @@ step_epi_cut <- function(recipe,
     extend_range_to_inf <- rep(extend_range_to_inf, 2)
   if (length(extend_range_to_inf) != 2L)
     rlang::abort("`extend_range_to_inf` must be a length 1 or 2 logical vector.")
+
+  breaks <- add_infinity(breaks, extend_range_to_inf)
+  prange <- paste(round(breaks, 3), collapse = ", ")
 
   add_step(
     recipe,
@@ -76,6 +87,9 @@ step_epi_cut <- function(recipe,
       breaks = breaks,
       extend_range_to_inf  = extend_range_to_inf,
       include_outside_range = include_outside_range,
+      collapse = collapse,
+      prange = prange,
+      columns = columns,
       skip = skip,
       id = id
     )
@@ -85,7 +99,7 @@ step_epi_cut <- function(recipe,
 step_epi_cut_new <-
   function(terms, role, trained,
            breaks, extend_range_to_inf,
-           include_outside_range, skip, id) {
+           include_outside_range, collapse, prange, columns, skip, id) {
     step(
       subclass = "epi_cut",
       terms = terms,
@@ -94,6 +108,9 @@ step_epi_cut_new <-
       breaks = breaks,
       extend_range_to_inf  = extend_range_to_inf,
       include_outside_range = include_outside_range,
+      collapse = collapse,
+      prange = prange,
+      columns = columns,
       skip = skip,
       id = id
     )
@@ -110,9 +127,11 @@ prep.step_epi_cut <- function(x, training, info = NULL, ...) {
   for (col_name in col_names) {
     ab <- create_full_breaks(
       var = training[, col_name, drop = TRUE],
-      breaks = x$breaks,
-      extend_range = x$extend_range_to_inf)
-    check_empty_buckets(col_name, training[, col_name, drop = TRUE], ab)
+      breaks = x$breaks
+    )
+    ab <- check_empty_buckets(
+      col_name, training[, col_name, drop = TRUE], ab, collapse
+    )
     full_breaks_check(ab)
     all_breaks[[col_name]] <- ab
   }
@@ -124,30 +143,42 @@ prep.step_epi_cut <- function(x, training, info = NULL, ...) {
     breaks = all_breaks,
     extend_range_to_inf  = x$extend_range_to_inf,
     include_outside_range = x$include_outside_range,
+    collapse = x$collapse,
+    prange = x$prange,
+    columns = recipes_eval_select(x$terms, training, info),
     skip = x$skip,
     id = x$id
   )
 }
 
-create_full_breaks <- function(var, breaks, extend_range) {
+add_infinity <- function(breaks, extend_range) {
+  if (extend_range[1]) breaks <- c(-Inf, breaks)
+  if (extend_range[2]) breaks <- c(breaks, Inf)
+  breaks
+}
+
+create_full_breaks <- function(var, breaks) {
   stopifnot(is.numeric(var), is.numeric(breaks))
   minv <- min(var, na.rm = TRUE)
-  if (extend_range[1]) minv <- -Inf
   maxv <- max(var, na.rm = TRUE)
-  if (extend_range[2]) maxv <- Inf
   if (minv < min(breaks)) breaks <- c(minv, breaks)
   if (maxv > max(breaks)) breaks <- c(maxv, breaks)
   sort(breaks)
 }
 
-check_empty_buckets <- function(name, x, breaks) {
+check_empty_buckets <- function(name, x, breaks, collapse) {
   tt <- table(cut(x, breaks))
   if (any(tt < 1)) {
-    cli::cli_abort(
-      c("Variable {name} results in some empty buckets.",
-        i = "{names(tt)[tt < 1]}")
-    )
+    if (collapse) {
+      breaks <- collapse_fct(breaks, tt)
+    } else {
+      cli::cli_abort(
+        c("Variable {name} results in some empty buckets.",
+          i = "{names(tt)[tt < 1]}")
+      )
+    }
   }
+  breaks
 }
 
 full_breaks_check <- function(breaks) {
@@ -208,4 +239,38 @@ adjust_levels_min_max <- function(x) {
   names(new_x) <- NULL
   names(new_levs) <- NULL
   factor(new_x, levels = new_levs)
+}
+
+collapse_fct <- function(breaks, counts) {
+  while (counts[1] == 0 && length(counts) > 0) {
+    breaks <- breaks[-2]
+    counts <- counts[-1]
+  }
+  while (counts[length(counts)] == 0 && length(counts) > 0) {
+    breaks <- breaks[-length(counts)]
+    counts <- counts[-length(counts)]
+  }
+  n <- length(counts)
+  if (n > 2) {
+    i <- 2
+    while (i < length(counts) && length(counts) > 0) {
+      if (counts[i] == 0) {
+        bigger <- counts[i + 1] >= counts[i - 1]
+        breaks <- breaks[-(i + !bigger)]
+        counts <- counts[-i]
+      } else {
+        i <- i + 1
+      }
+    }
+  }
+  breaks
+}
+
+#' @export
+print.step_epi_cut <- function(x, width = max(20, options()$width - 30), ...) {
+  print_epi_step(
+    x$columns, x$terms, x$trained,
+    title = "Discretizing numeric variables ",
+    conjunction = "to", extra_text = x$prange)
+  invisible(x)
 }
