@@ -109,7 +109,7 @@ data for model fitting. But before diving into them, it will be helpful to under
 
 ---
 
-#### Aside on `recipes`
+#### Aside on `recipes` {.unnumbered}
 
 `recipes` can assign one or more roles to each column in the data. The roles 
 are not restricted to a predefined set; they can be anything. 
@@ -137,7 +137,7 @@ manipulate variable roles easily.
 > 
 > `remove_role()` eliminates a single existing role in the recipe.
 
-#### End aside
+#### End aside {.unnumbered}
 
 ---
 
@@ -444,26 +444,11 @@ jhu <- case_death_rate_subset %>%
 r <- epi_recipe(jhu) %>%
   add_role(time_value, new_role = "predictor") %>%
   step_dummy(geo_value_factor) %>%
-  step_epi_lag(case_rate, lag = c(0, 7, 14)) %>%
-  step_epi_ahead(case_rate, ahead = 7, role = "predictor") %>%
-  step_mutate(
-    pct_diff_ahead = case_when(
-      lag_7_case_rate == 0 ~ 0,
-      TRUE ~ (ahead_7_case_rate - lag_0_case_rate) / lag_0_case_rate),
-    pct_diff_wk1 = case_when(
-      lag_7_case_rate == 0 ~ 0, 
-      TRUE ~ (lag_0_case_rate - lag_7_case_rate) / lag_7_case_rate),
-    pct_diff_wk2 = case_when(
-      lag_14_case_rate == 0 ~ 0,
-      TRUE ~ (lag_7_case_rate - lag_14_case_rate) / lag_14_case_rate)) %>%
-  step_mutate(
-    response = case_when(
-      pct_diff_ahead < -0.20 ~ "down",
-      pct_diff_ahead > 0.25 ~ "up",
-      TRUE ~ "flat"), 
-    role = "outcome") %>% 
-  step_rm(death_rate, case_rate, lag_0_case_rate,  lag_7_case_rate, 
-          lag_14_case_rate, ahead_7_case_rate, pct_diff_ahead) %>%
+  step_growth_rate(case_rate, role = "gr", method = "smooth_spline") %>%
+  step_epi_lag(has_role("gr"), lag = c(0, 7, 14)) %>%
+  step_epi_ahead(starts_with("gr"), ahead = 7) %>%
+  # prep.step_cut is unexported from recipes ?!
+  #step_epi_cut(starts_with("ahead_"), breaks = c(-.2, .25)) %>%
   step_epi_naomit()
 ```
 
