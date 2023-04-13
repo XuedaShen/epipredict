@@ -431,24 +431,18 @@ g_{\text{flat}}(x) &= \text{ln}\left(\frac{Pr(Z_{\ell,t}=\text{up}|x)}{Pr(Z_{\el
 
 
 Preprocessing steps are similar to the previous models with an additional step 
-of categorizing the response variables. Again, we will use a subset of death rate and case rate data from our built-in dataset 
-`case_death_rate_subset`.
+of categorizing the response variables. Again, we will use a subset of case and death data from the earlier `counts_subset`. Because these are daily counts (rather than weekly), we adjust the definitions of up and down to the daily scale (divide by 7).
 ```{r}
-jhu <- case_death_rate_subset %>%
-  dplyr::filter(time_value >= "2021-06-04", 
-                time_value <= "2021-12-31",
-  geo_value %in% c("ca","fl","tx","ny","nj")) %>%
-  mutate(geo_value_factor = as.factor(geo_value)) %>%
-  as_epi_df()
-
-r <- epi_recipe(jhu) %>%
+r <- epi_recipe(counts_subset) %>%
   add_role(time_value, new_role = "predictor") %>%
   step_dummy(geo_value_factor) %>%
-  step_growth_rate(case_rate, role = "gr", method = "smooth_spline") %>%
+  step_growth_rate(cases, role = "gr") %>%
   step_epi_lag(has_role("gr"), lag = c(0, 7, 14)) %>%
   step_epi_ahead(starts_with("gr"), ahead = 7) %>%
   # prep.step_cut is unexported from recipes ?!
-  #step_epi_cut(starts_with("ahead_"), breaks = c(-.2, .25)) %>%
+  step_epi_cut(
+    starts_with("ahead_"), 
+    breaks = c(-.2 / 7, .25 / 7)) %>%
   step_epi_naomit()
 ```
 
@@ -456,9 +450,9 @@ We will fit the multinomial regression and examine the predictions:
 
 ```{r, warning=FALSE}
 wf <- epi_workflow(r, parsnip::multinom_reg()) %>%
-  fit(jhu)
+  fit(counts_subset)
 
-latest <- get_test_data(recipe = r, x = jhu)
+latest <- get_test_data(recipe = r, x = counts_subset)
 predict(wf, latest) %>% filter(!is.na(.pred_class))
 ```
 
@@ -484,7 +478,7 @@ epi_workflow() %>%
 ## Benefits of Lagging and Leading in `epipredict`
 
 The `step_epi_ahead` and `step_epi_lag` functions in the `epipredict` package
-is handy for creating correct lags and leads for future predictions. 
+are handy for creating correct lags and leads for future predictions. 
 
 Let's start with a simple dataset and preprocessing:
 ```{r}
@@ -494,38 +488,35 @@ ex <- filter(
   time_value <= "2021-12-31",
   geo_value == "ca"
 )
-
 dim(ex)
 ```
 
-We want to predict death rates on `r max(ex$time_value) + 7`, which is 7 days ahead of the 
-latest available date in our dataset. 
+We want to predict death rates on `r max(ex$time_value) + 7`, which is 7 days 
+after the latest available date in our dataset. 
 
 We will compare two methods of trying to create lags and leads:
 ```{r}
-p1 <- epi_recipe(ex) %>%
+b1 <- epi_recipe(ex) %>%
   step_epi_lag(case_rate, lag = c(0, 7, 14)) %>%
   step_epi_lag(death_rate, lag = c(0, 7, 14)) %>%
-  step_epi_ahead(death_rate, ahead = 7, role = "outcome") %>%
+  step_epi_ahead(death_rate, ahead = 7) %>%
   step_epi_naomit() %>%
-  prep()
-
-b1 <- bake(p1, ex)
+  prep() %>%
+  bake(ex)
 b1
 
-
-p2 <- epi_recipe(ex) %>%
-  step_mutate(lag0case_rate = lag(case_rate, 0),
-              lag7case_rate = lag(case_rate, 7),
-              lag14case_rate = lag(case_rate, 14),
-              lag0death_rate = lag(death_rate, 0),
-              lag7death_rate = lag(death_rate, 7),
-              lag14death_rate = lag(death_rate, 14),
-              ahead7death_rate = lead(death_rate, 7)) %>%
+b2 <- epi_recipe(ex) %>%
+  step_mutate(
+    lag_0_case_rate = lag(case_rate, 0),
+    lag_7_case_rate = lag(case_rate, 7),
+    lag_14_case_rate = lag(case_rate, 14),
+    lag_0_death_rate = lag(death_rate, 0),
+    lag_7_death_rate = lag(death_rate, 7),
+    lag_14_death_rate = lag(death_rate, 14),
+    ahead_7_death_rate = lead(death_rate, 7)) %>%
   step_epi_naomit() %>%
-  prep()
-
-b2 <- bake(p2, ex)
+  prep() %>%
+  bake(ex)
 b2
 ```
 
@@ -534,21 +525,21 @@ the second version, the one that doesn't use `step_epi_ahead` and `step_epi_lag`
 has omitted dates compared to the one that used the `epipredict` functions.
 ```{r}
 dates_used_in_training1 <- b1 %>% 
-  select(- ahead_7_death_rate) %>% 
+  select(-ahead_7_death_rate) %>% 
   na.omit() %>% 
-  select(time_value)
-dates_used_in_training1
+  pull(time_value) %>%
+  range()
 
 dates_used_in_training2 <- b2 %>% 
-  select(- ahead7death_rate) %>% 
+  select(-ahead_7_death_rate) %>% 
   na.omit() %>% 
-  select(time_value)
-dates_used_in_training2
+  pull(time_value) %>%
+  range()
 ```
 
-The model that is trained based on the `{recipes}` functions will predict 7 days ahead from 
-`r max(dates_used_in_training2$time_value)`
-instead of 7 days ahead from `r max(dates_used_in_training1$time_value)`.
+The model that is trained based on the `{recipes}` functions will predict 7 
+days ahead from `r max(dates_used_in_training2)`
+instead of 7 days ahead from `r max(dates_used_in_training1)`.
 
 ## References
 

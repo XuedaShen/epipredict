@@ -130,7 +130,7 @@ prep.step_epi_cut <- function(x, training, info = NULL, ...) {
       breaks = x$breaks
     )
     ab <- check_empty_buckets(
-      col_name, training[, col_name, drop = TRUE], ab, collapse
+      col_name, training[, col_name, drop = TRUE], ab, x$collapse
     )
     full_breaks_check(ab)
     all_breaks[[col_name]] <- ab
