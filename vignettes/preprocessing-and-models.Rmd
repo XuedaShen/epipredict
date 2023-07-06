@@ -467,10 +467,14 @@ above. However, only one of `add_formula()`, `add_recipe()`, or
 `add_formula` rather than `add_recipe`, we will `prep` and `bake` our recipe to
 return a `data.frame` that could be used for model fitting.
 ```{r}
-b <- bake(prep(r, jhu), jhu)
+b <- bake(prep(r, counts_subset), counts_subset)
 
 epi_workflow() %>%
-  add_formula(response ~ geo_value + time_value + pct_diff_wk1 + pct_diff_wk2) %>%
+  add_formula(
+    ahead_7_gr_7_rel_change_cases ~ geo_value + time_value +
+      lag_0_gr_7_rel_change_cases + lag_7_gr_7_rel_change_cases + 
+      lag_14_gr_7_rel_change_cases
+  ) %>%
   add_model(parsnip::multinom_reg()) %>%
   fit(data = b)
 ```

@@ -13,7 +13,6 @@ step_epi_cut(
   extend_range_to_inf = TRUE,
   include_outside_range = FALSE,
   collapse = FALSE,
-  columns = NULL,
   skip = FALSE,
   id = rand_id("epi_cut")
 )
@@ -45,7 +44,7 @@ Defaults to \code{FALSE}, values outside the original range will be set to \code
 \item{collapse}{Logical. If the some buckets have no elements in the training
 set, remove those buckets from the resulting factor. For example,
 if \code{breaks = c(-Inf, 0, 2, Inf)} but the target feature has no values in
-\link{0, 2}, then the result will be as if breaks had been \code{c(-Inf, 0, Inf)}.
+\verb{[0, 2]}, then the result will be as if breaks had been \code{c(-Inf, 0, Inf)}.
 The empty bucket will be combined with whichever neighbouring bucket has
 fewer values. No warning will be issued. Default is FALSE.}
 
@@ -87,7 +86,7 @@ If \code{extend_range_to_inf} is TRUE, then there is no difference.
 }
 \examples{
 df <- data.frame(x = 1:10, y = 5:14)
-rec <- recipe(df)
+rec <- epi_recipe(df)
 
 # The min and max of the variable are used as boundaries
 # if they exceed the breaks (when `extend_range_to_inf = FALSE`)
